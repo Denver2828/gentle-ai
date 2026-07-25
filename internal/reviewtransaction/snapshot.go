@@ -812,9 +812,14 @@ func (builder *SnapshotBuilder) buildCurrentChanges(ctx context.Context, intende
 
 func (builder SnapshotBuilder) resolveCurrentChangesBase(ctx context.Context, projection Projection) (string, bool, error) {
 	baseTree, headErr := builder.resolveTree(ctx, "HEAD")
-	if headErr == nil || projection != ProjectionStaged {
-		return baseTree, false, headErr
+	if headErr == nil {
+		return baseTree, false, nil
 	}
+	// HEAD did not resolve. The unborn verification below is projection
+	// independent: an unborn repository has no commits for the workspace
+	// projection to diff against either, so every current-changes projection
+	// falls back to the empty tree once unborn-ness is proven. Any other
+	// resolution failure keeps returning the original error.
 
 	refOutput, err := runGit(ctx, builder.Repo, nil, nil, "symbolic-ref", "--quiet", "HEAD")
 	if err != nil {
