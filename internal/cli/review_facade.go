@@ -2072,7 +2072,8 @@ func discoverCompactFacadeGateReview(ctx context.Context, repo, lineage string, 
 				targetResolution = append(targetResolution, targetResolutionFailure{lineage: record.State.LineageID, err: assessErr})
 				continue
 			}
-			if errors.Is(assessErr, reviewtransaction.ErrReviewedDeliveryNotOneCommit) {
+			if errors.Is(assessErr, reviewtransaction.ErrReviewedDeliveryNotOneCommit) ||
+				errors.Is(assessErr, reviewtransaction.ErrReviewedDeliveryBaseBehindBoundary) {
 				// The context binds the frozen receipt values — the expected
 				// side of the mismatch — exactly as evidence-bearing denials
 				// do, so the real cause stays discoverable.

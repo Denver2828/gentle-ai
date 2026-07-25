@@ -730,6 +730,15 @@ func currentBranch(ctx context.Context, repo string) string {
 // failures while computing the shape stay untyped and keep failing closed.
 var ErrReviewedDeliveryNotOneCommit = errors.New("reviewed delivery is not exactly one commit from its reviewed base")
 
+// ErrReviewedDeliveryBaseBehindBoundary reports that the reviewed delivery
+// base commit is absent from the publication range because the boundary
+// already advanced past the reviewed delivery — the reviewed commit was
+// published, so the receipt no longer governs the commits now in range. Like
+// ErrReviewedDeliveryNotOneCommit this is a deterministic statement about
+// candidate shape versus the reviewed receipt over a healthy inventory, so
+// discovery classifies it with the scope-changed family instead of corruption.
+var ErrReviewedDeliveryBaseBehindBoundary = errors.New("reviewed delivery base commit is behind the advanced publication boundary")
+
 func buildPushTarget(ctx context.Context, repo, selector, deliveryBaseTree, reviewedBaseTree string) (Target, *PushRequest, error) {
 	selection, err := selectPrePushBoundary(ctx, repo, selector)
 	if err != nil {
@@ -1149,8 +1158,15 @@ func reviewedDeliveryBase(ctx context.Context, repo, publicationBase, head, revi
 			matches = append(matches, commit)
 		}
 	}
-	if len(matches) != 1 {
-		return "", errors.New("reviewed delivery base commit is missing or ambiguous in publication range")
+	if len(matches) == 0 {
+		// The range walk resolved and the reviewed base tree is provably not
+		// reachable from it: the publication boundary already advanced past
+		// the reviewed delivery. That is a typed shape statement about this
+		// receipt versus the current range, not an opaque derivation failure.
+		return "", ErrReviewedDeliveryBaseBehindBoundary
+	}
+	if len(matches) > 1 {
+		return "", errors.New("reviewed delivery base commit is ambiguous in publication range")
 	}
 	return matches[0], nil
 }
