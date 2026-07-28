@@ -253,33 +253,18 @@ func migrateOpenClawLegacyMCPServers(baseJSON []byte) ([]byte, error) {
 // versions wrote the registration (issue #1868). The file also holds the
 // OAuth session, so an unparsable base aborts instead of being reset.
 func injectClaudeUserConfig(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
-	configPath := claude.UserConfigPath(homeDir)
-	baseJSON, err := osReadFile(configPath)
-	if err != nil {
-		return InjectionResult{}, err
-	}
-	if _, parseErr := filemerge.UnmarshalJSONObject(baseJSON); parseErr != nil {
-		return InjectionResult{}, fmt.Errorf("refusing to modify %q: it holds the Claude Code session and could not be parsed as JSON: %w", configPath, parseErr)
-	}
-	merged, err := filemerge.MergeJSONObjects(baseJSON, DefaultContext7OverlayJSON())
-	if err != nil {
-		return InjectionResult{}, err
-	}
-
-	writeResult, err := filemerge.WriteFileAtomic(configPath, merged, 0o600)
+	writeResult, configPath, err := claude.MergeUserConfig(homeDir, DefaultContext7OverlayJSON())
 	if err != nil {
 		return InjectionResult{}, err
 	}
 
 	changed := writeResult.Changed
 	files := []string{configPath}
+	// Best-effort: the block is inert wherever it sits, so a settings.json
+	// that cannot be read or rewritten must not fail the injection that
+	// already succeeded above.
 	settingsPath := adapter.SettingsPath(homeDir)
-	settingsChanged, err := removeInertSettingsMCPServers(settingsPath)
-
-	if err != nil {
-		return InjectionResult{}, err
-	}
-	if settingsChanged {
+	if settingsChanged, cleanupErr := removeInertSettingsMCPServers(settingsPath); cleanupErr == nil && settingsChanged {
 		changed = true
 		files = append(files, settingsPath)
 	}

@@ -321,21 +321,9 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 			// Claude Code never reads ~/.claude/mcp/engram.json — user-scope
 			// MCP servers live in ~/.claude.json (issue #1868), which also
 			// holds the OAuth session: an unparsable base aborts, 0600 stays.
-			configPath := claude.UserConfigPath(configHomeDir)
 			legacyPath := adapter.MCPConfigPath(configHomeDir, "engram")
-			engramCmd := claudeEngramCommand(configPath, legacyPath)
-			raw, readErr := osReadFile(configPath)
-			if readErr != nil {
-				return InjectionResult{}, readErr
-			}
-			if _, parseErr := filemerge.UnmarshalJSONObject(raw); parseErr != nil {
-				return InjectionResult{}, fmt.Errorf("refusing to modify %q: it holds the Claude Code session and could not be parsed as JSON: %w", configPath, parseErr)
-			}
-			merged, mergeErr := filemerge.MergeJSONObjects(raw, engramOverlayJSON(adapter.Agent(), engramCmd))
-			if mergeErr != nil {
-				return InjectionResult{}, mergeErr
-			}
-			userWrite, writeErr := filemerge.WriteFileAtomic(configPath, merged, 0o600)
+			engramCmd := claudeEngramCommand(claude.UserConfigPath(configHomeDir), legacyPath)
+			userWrite, configPath, writeErr := claude.MergeUserConfig(configHomeDir, engramOverlayJSON(adapter.Agent(), engramCmd))
 			if writeErr != nil {
 				return InjectionResult{}, writeErr
 			}

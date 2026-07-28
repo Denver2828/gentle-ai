@@ -875,7 +875,14 @@ func rewriteJSONFile(path string, jsonPaths ...jsonPath) operation {
 				}
 				return true, true, nil
 			}
-			_, err = filemerge.WriteFileAtomic(path, updated, 0o644)
+			// Preserve the file's existing mode: ~/.claude.json is injected
+			// with 0600 because it holds the OAuth session, and an uninstall
+			// rewrite must not widen it.
+			perm := os.FileMode(0o644)
+			if info, statErr := os.Lstat(path); statErr == nil {
+				perm = info.Mode().Perm()
+			}
+			_, err = filemerge.WriteFileAtomic(path, updated, perm)
 			if err != nil {
 				return false, false, err
 			}

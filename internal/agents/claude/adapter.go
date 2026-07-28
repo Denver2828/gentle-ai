@@ -2,11 +2,13 @@ package claude
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/capabilitymanifest"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/components/filemerge"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/installcmd"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/system"
@@ -88,6 +90,27 @@ func (a *Adapter) InstallCommand(profile system.PlatformProfile) ([][]string, er
 // it also carries the OAuth session, so writers must never reset it.
 func UserConfigPath(homeDir string) string {
 	return filepath.Join(homeDir, ".claude.json")
+}
+
+// MergeUserConfig merges overlayJSON into ~/.claude.json with the guarantees
+// that file demands: an unparsable base aborts instead of being reset to {},
+// and the write stays at 0600. Both MCP injectors share this as the single
+// enforcement point for the non-destructive requirement of issue #1868.
+func MergeUserConfig(homeDir string, overlayJSON []byte) (filemerge.WriteResult, string, error) {
+	configPath := UserConfigPath(homeDir)
+	raw, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return filemerge.WriteResult{}, configPath, fmt.Errorf("read %q: %w", configPath, err)
+	}
+	if _, parseErr := filemerge.UnmarshalJSONObject(raw); parseErr != nil {
+		return filemerge.WriteResult{}, configPath, fmt.Errorf("refusing to modify %q: it holds the Claude Code session and could not be parsed as JSON: %w", configPath, parseErr)
+	}
+	merged, err := filemerge.MergeJSONObjects(raw, overlayJSON)
+	if err != nil {
+		return filemerge.WriteResult{}, configPath, err
+	}
+	writeResult, err := filemerge.WriteFileAtomic(configPath, merged, 0o600)
+	return writeResult, configPath, err
 }
 
 func (a *Adapter) GlobalConfigDir(homeDir string) string {

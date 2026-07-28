@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -505,6 +506,11 @@ func TestInjectClaudeWritesUserConfigAndIsIdempotent(t *testing.T) {
 	raw, err := os.ReadFile(userConfigPath)
 	if err != nil {
 		t.Fatalf("ReadFile(user config) error = %v", err)
+	}
+	if info, statErr := os.Stat(userConfigPath); statErr != nil {
+		t.Fatalf("Stat(user config) error = %v", statErr)
+	} else if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
+		t.Fatalf("~/.claude.json mode = %o; want 0600 (holds the OAuth session)", mode)
 	}
 	root := map[string]any{}
 	if err := json.Unmarshal(raw, &root); err != nil {

@@ -78,6 +78,25 @@ func readClaudeUserConfigEngramEntry(t *testing.T, home string) map[string]any {
 	return engram
 }
 
+func TestInjectClaudeRefusesCorruptUserConfig(t *testing.T) {
+	home := t.TempDir()
+	userConfigPath := filepath.Join(home, ".claude.json")
+	corrupt := []byte("{ this is not json")
+	if err := os.WriteFile(userConfigPath, corrupt, 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt user config) error = %v", err)
+	}
+	if _, err := Inject(home, claudeAdapter()); err == nil {
+		t.Fatalf("Inject() error = nil; want refusal on corrupt ~/.claude.json")
+	}
+	after, err := os.ReadFile(userConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(user config) error = %v", err)
+	}
+	if string(after) != string(corrupt) {
+		t.Fatalf("corrupt ~/.claude.json must be left byte-identical; got %s", after)
+	}
+}
+
 func TestInjectClaudeWritesMCPConfig(t *testing.T) {
 	home := t.TempDir()
 
