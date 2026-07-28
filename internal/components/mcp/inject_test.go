@@ -496,6 +496,11 @@ func TestInjectClaudeWritesUserConfigAndIsIdempotent(t *testing.T) {
 		t.Fatalf("Inject() first changed = false")
 	}
 
+	afterFirst, err := os.ReadFile(userConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(user config after first) error = %v", err)
+	}
+
 	second, err := Inject(home, claudeAdapter())
 	if err != nil {
 		t.Fatalf("Inject() second error = %v", err)
@@ -507,6 +512,9 @@ func TestInjectClaudeWritesUserConfigAndIsIdempotent(t *testing.T) {
 	raw, err := os.ReadFile(userConfigPath)
 	if err != nil {
 		t.Fatalf("ReadFile(user config) error = %v", err)
+	}
+	if string(raw) != string(afterFirst) {
+		t.Fatalf("second Inject() must leave ~/.claude.json byte-identical; got diff")
 	}
 	if info, statErr := os.Stat(userConfigPath); statErr != nil {
 		t.Fatalf("Stat(user config) error = %v", statErr)
