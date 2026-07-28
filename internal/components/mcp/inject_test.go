@@ -483,7 +483,8 @@ func TestInjectClaudeWritesUserConfigAndIsIdempotent(t *testing.T) {
 	home := t.TempDir()
 	userConfigPath := filepath.Join(home, ".claude.json")
 	userConfig := `{"oauthAccount":{"emailAddress":"user@example.com"},"projects":{"/repo":{"allowedTools":[]}},"mcpServers":{"codegraph":{"command":"codegraph","args":["serve","--mcp"]}}}`
-	if err := os.WriteFile(userConfigPath, []byte(userConfig), 0o600); err != nil {
+	// Seeded intentionally loose: injection must tighten it to 0600.
+	if err := os.WriteFile(userConfigPath, []byte(userConfig), 0o644); err != nil {
 		t.Fatalf("WriteFile(user config) error = %v", err)
 	}
 
