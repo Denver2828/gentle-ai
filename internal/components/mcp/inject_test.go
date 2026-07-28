@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/openclaw"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/opencode"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/vscode"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/versions"
 )
 
 func cursorAdapter(t *testing.T) agents.Adapter {
@@ -476,14 +478,12 @@ func TestInjectOpenCodePreservesOtherMCPEntriesWhenReplacingContext7(t *testing.
 	}
 }
 
-func TestInjectClaudeMergesContext7IntoSettingsAndIsIdempotent(t *testing.T) {
+func TestInjectClaudeWritesUserConfigAndIsIdempotent(t *testing.T) {
 	home := t.TempDir()
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(settings dir) error = %v", err)
-	}
-	if err := os.WriteFile(settingsPath, []byte(`{"theme":"dark"}`), 0o644); err != nil {
-		t.Fatalf("WriteFile(settings) error = %v", err)
+	userConfigPath := filepath.Join(home, ".claude.json")
+	userConfig := `{"oauthAccount":{"emailAddress":"user@example.com"},"projects":{"/repo":{"allowedTools":[]}},"mcpServers":{"codegraph":{"command":"codegraph","args":["serve","--mcp"]}}}`
+	if err := os.WriteFile(userConfigPath, []byte(userConfig), 0o600); err != nil {
+		t.Fatalf("WriteFile(user config) error = %v", err)
 	}
 
 	first, err := Inject(home, claudeAdapter())
@@ -502,12 +502,103 @@ func TestInjectClaudeMergesContext7IntoSettingsAndIsIdempotent(t *testing.T) {
 		t.Fatalf("Inject() second changed = true")
 	}
 
-	context7 := readMCPServersContext7Entry(t, settingsPath)
-	if got := context7["command"]; got != "npx" {
-		t.Fatalf("mcpServers.context7.command = %#v; want npx", got)
+	raw, err := os.ReadFile(userConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(user config) error = %v", err)
+	}
+	root := map[string]any{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("Unmarshal(user config) error = %v", err)
+	}
+	if _, ok := root["oauthAccount"].(map[string]any); !ok {
+		t.Fatalf("oauthAccount must be preserved; got %s", raw)
+	}
+	if _, ok := root["projects"].(map[string]any); !ok {
+		t.Fatalf("projects must be preserved; got %s", raw)
+	}
+	servers, _ := root["mcpServers"].(map[string]any)
+	if codegraph, _ := servers["codegraph"].(map[string]any); codegraph["command"] != "codegraph" {
+		t.Fatalf("existing codegraph registration must be preserved; got %#v", servers["codegraph"])
+	}
+	context7, _ := servers["context7"].(map[string]any)
+	if context7["command"] != "npx" {
+		t.Fatalf("mcpServers.context7.command = %#v; want npx", context7["command"])
+	}
+	if args := fmt.Sprintf("%v", context7["args"]); !strings.Contains(args, versions.Context7MCP) {
+		t.Fatalf("context7.args = %s; want pinned version %s", args, versions.Context7MCP)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".claude", "mcp", "context7.json")); !os.IsNotExist(err) {
 		t.Fatalf("Claude Context7 must not be written to ~/.claude/mcp/context7.json; stat err = %v", err)
+	}
+}
+
+// TestInjectClaudeSettingsInertBlockCleanup: the inert settings.json block is
+// removed when it only holds the managed context7 entry, and left untouched
+// when it carries servers gentle-ai does not manage.
+func TestInjectClaudeSettingsInertBlockCleanup(t *testing.T) {
+	cases := []struct {
+		name           string
+		settings       string
+		wantKeyRemoved bool
+	}{
+		{"managed-only block is removed", `{"theme":"dark","mcpServers":{"context7":{"command":"npx","args":["old"]}}}`, true},
+		{"foreign block is left alone", `{"theme":"dark","mcpServers":{"context7":{"command":"npx"},"stranded":{"command":"stranded-server"}}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			settingsPath := filepath.Join(home, ".claude", "settings.json")
+			if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(settings dir) error = %v", err)
+			}
+			if err := os.WriteFile(settingsPath, []byte(tc.settings), 0o644); err != nil {
+				t.Fatalf("WriteFile(settings) error = %v", err)
+			}
+
+			if _, err := Inject(home, claudeAdapter()); err != nil {
+				t.Fatalf("Inject() error = %v", err)
+			}
+
+			readMCPServersContext7Entry(t, filepath.Join(home, ".claude.json"))
+
+			settingsRaw, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatalf("ReadFile(settings) error = %v", err)
+			}
+			settings := map[string]any{}
+			if err := json.Unmarshal(settingsRaw, &settings); err != nil {
+				t.Fatalf("Unmarshal(settings) error = %v", err)
+			}
+			_, hasKey := settings["mcpServers"]
+			if tc.wantKeyRemoved && hasKey {
+				t.Fatalf("inert mcpServers key must be removed; got %s", settingsRaw)
+			}
+			if !tc.wantKeyRemoved && !hasKey {
+				t.Fatalf("foreign mcpServers block must be left untouched; got %s", settingsRaw)
+			}
+			if settings["theme"] != "dark" {
+				t.Fatalf("settings.theme = %#v; want dark preserved", settings["theme"])
+			}
+		})
+	}
+}
+
+func TestInjectClaudeRefusesCorruptUserConfig(t *testing.T) {
+	home := t.TempDir()
+	userConfigPath := filepath.Join(home, ".claude.json")
+	corrupt := []byte("{ this is not json")
+	if err := os.WriteFile(userConfigPath, corrupt, 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt user config) error = %v", err)
+	}
+	if _, err := Inject(home, claudeAdapter()); err == nil {
+		t.Fatalf("Inject() error = nil; want refusal on corrupt ~/.claude.json")
+	}
+	after, err := os.ReadFile(userConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(user config) error = %v", err)
+	}
+	if string(after) != string(corrupt) {
+		t.Fatalf("corrupt ~/.claude.json must be left byte-identical; got %s", after)
 	}
 }
 
@@ -527,7 +618,7 @@ func TestInjectClaudeLeavesLegacyContext7FileForExplicitUninstallCleanup(t *test
 	if _, err := os.Stat(legacyPath); err != nil {
 		t.Fatalf("legacy context7 file should be left for explicit uninstall cleanup: %v", err)
 	}
-	readMCPServersContext7Entry(t, filepath.Join(home, ".claude", "settings.json"))
+	readMCPServersContext7Entry(t, filepath.Join(home, ".claude.json"))
 }
 
 func TestInjectCursorWithMalformedMCPJsonRecovery(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/filemerge"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
@@ -316,6 +317,42 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 	// 1. Write MCP server config using the adapter's strategy.
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
+		if adapter.Agent() == model.AgentClaudeCode {
+			// Claude Code never reads ~/.claude/mcp/engram.json — user-scope
+			// MCP servers live in ~/.claude.json (issue #1868), which also
+			// holds the OAuth session: an unparsable base aborts, 0600 stays.
+			configPath := claude.UserConfigPath(configHomeDir)
+			legacyPath := adapter.MCPConfigPath(configHomeDir, "engram")
+			engramCmd := claudeEngramCommand(configPath, legacyPath)
+			raw, readErr := osReadFile(configPath)
+			if readErr != nil {
+				return InjectionResult{}, readErr
+			}
+			if _, parseErr := filemerge.UnmarshalJSONObject(raw); parseErr != nil {
+				return InjectionResult{}, fmt.Errorf("refusing to modify %q: it holds the Claude Code session and could not be parsed as JSON: %w", configPath, parseErr)
+			}
+			merged, mergeErr := filemerge.MergeJSONObjects(raw, engramOverlayJSON(adapter.Agent(), engramCmd))
+			if mergeErr != nil {
+				return InjectionResult{}, mergeErr
+			}
+			userWrite, writeErr := filemerge.WriteFileAtomic(configPath, merged, 0o600)
+			if writeErr != nil {
+				return InjectionResult{}, writeErr
+			}
+			changed = changed || userWrite.Changed
+			files = append(files, configPath)
+
+			// Drop the dead separate file a previous version wrote.
+			if legacyPath != "" {
+				if removeErr := os.Remove(legacyPath); removeErr == nil {
+					changed = true
+					files = append(files, legacyPath)
+				} else if !os.IsNotExist(removeErr) {
+					return InjectionResult{}, fmt.Errorf("remove dead engram mcp file %q: %w", legacyPath, removeErr)
+				}
+			}
+			break
+		}
 		// Engram v1.10.3+ writes an absolute path for the command field when
 		// `engram setup <agent>` is invoked. gentle-ai's Inject() runs after
 		// engram setup, so we must preserve any absolute command path already
@@ -649,6 +686,29 @@ func readFileOrEmpty(path string) (string, error) {
 		return "", fmt.Errorf("read file %q: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// claudeEngramCommand resolves the engram command for ~/.claude.json: an
+// entry already present there wins, then the absolute path `engram setup`
+// wrote into the legacy separate file, then the stable-path resolution.
+func claudeEngramCommand(configPath, legacyPath string) string {
+	raw, err := osReadFile(configPath)
+	if err == nil {
+		if cmd, ok := existingMergedEngramCommand(raw, model.AgentClaudeCode); ok {
+			return stableEngramCommandForExisting(cmd, model.AgentClaudeCode)
+		}
+	}
+	if legacyPath != "" {
+		if legacyRaw, readErr := os.ReadFile(legacyPath); readErr == nil {
+			var server map[string]any
+			if json.Unmarshal(legacyRaw, &server) == nil {
+				if cmd, ok := executableFromCommandValue(server["command"]); ok {
+					return stableEngramCommandForExisting(cmd, model.AgentClaudeCode)
+				}
+			}
+		}
+	}
+	return preferredStableEngramCommand()
 }
 
 func stableEngramCommandForMergedConfig(path string, agentID model.AgentID) string {

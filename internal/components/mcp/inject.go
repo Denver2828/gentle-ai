@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/filemerge"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/versions"
@@ -24,7 +25,7 @@ func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
 		if adapter.Agent() == model.AgentClaudeCode {
-			return injectMergeIntoSettings(homeDir, adapter)
+			return injectClaudeUserConfig(homeDir, adapter)
 		}
 		return injectSeparateFile(homeDir, adapter)
 	case model.StrategyMergeIntoSettings:
@@ -244,6 +245,87 @@ func migrateOpenClawLegacyMCPServers(baseJSON []byte) ([]byte, error) {
 	}
 
 	return append(migrated, '\n'), nil
+}
+
+// injectClaudeUserConfig registers Context7 in ~/.claude.json, the only
+// user-scope location Claude Code reads MCP servers from — settings.json
+// silently ignores a top-level mcpServers key, which is exactly where earlier
+// versions wrote the registration (issue #1868). The file also holds the
+// OAuth session, so an unparsable base aborts instead of being reset.
+func injectClaudeUserConfig(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
+	configPath := claude.UserConfigPath(homeDir)
+	baseJSON, err := osReadFile(configPath)
+	if err != nil {
+		return InjectionResult{}, err
+	}
+	if _, parseErr := filemerge.UnmarshalJSONObject(baseJSON); parseErr != nil {
+		return InjectionResult{}, fmt.Errorf("refusing to modify %q: it holds the Claude Code session and could not be parsed as JSON: %w", configPath, parseErr)
+	}
+	merged, err := filemerge.MergeJSONObjects(baseJSON, DefaultContext7OverlayJSON())
+	if err != nil {
+		return InjectionResult{}, err
+	}
+
+	writeResult, err := filemerge.WriteFileAtomic(configPath, merged, 0o600)
+	if err != nil {
+		return InjectionResult{}, err
+	}
+
+	changed := writeResult.Changed
+	files := []string{configPath}
+	settingsPath := adapter.SettingsPath(homeDir)
+	settingsChanged, err := removeInertSettingsMCPServers(settingsPath)
+
+	if err != nil {
+		return InjectionResult{}, err
+	}
+	if settingsChanged {
+		changed = true
+		files = append(files, settingsPath)
+	}
+
+	return InjectionResult{Changed: changed, Files: files}, nil
+}
+
+// removeInertSettingsMCPServers deletes the inert top-level mcpServers key
+// from settings.json once the real registration lives in ~/.claude.json —
+// but only when the block contains nothing beyond the context7 entry
+// gentle-ai wrote there; removing user-authored data is not this
+// migration's call. An unparsable settings file is left untouched.
+func removeInertSettingsMCPServers(settingsPath string) (bool, error) {
+	if settingsPath == "" {
+		return false, nil
+	}
+	raw, err := osReadFile(settingsPath)
+	if err != nil {
+		return false, err
+	}
+	root, err := filemerge.UnmarshalJSONObject(raw)
+	if err != nil {
+		return false, nil
+	}
+	servers, ok := root["mcpServers"].(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	for name := range servers {
+		if name != "context7" {
+			return false, nil
+		}
+	}
+	delete(root, "mcpServers")
+
+	encoded, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("marshal cleaned settings json: %w", err)
+	}
+
+	writeResult, err := filemerge.WriteFileAtomic(settingsPath, append(encoded, '\n'), 0o644)
+	if err != nil {
+		return false, err
+	}
+
+	return writeResult.Changed, nil
 }
 
 // injectMCPConfigFile writes to a dedicated mcp.json config file (Cursor pattern).

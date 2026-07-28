@@ -83,6 +83,13 @@ func (a *Adapter) InstallCommand(profile system.PlatformProfile) ([][]string, er
 
 // --- Config paths ---
 
+// UserConfigPath returns ~/.claude.json, the only user-scope file Claude Code
+// reads MCP server registrations from (see code.claude.com/docs/en/settings);
+// it also carries the OAuth session, so writers must never reset it.
+func UserConfigPath(homeDir string) string {
+	return filepath.Join(homeDir, ".claude.json")
+}
+
 func (a *Adapter) GlobalConfigDir(homeDir string) string {
 	return filepath.Join(homeDir, ".claude")
 }

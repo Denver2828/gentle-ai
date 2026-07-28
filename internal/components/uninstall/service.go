@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/backup"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/communitytool"
@@ -722,7 +723,7 @@ func context7Targets(adapter agents.Adapter, homeDir string) []string {
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
 		if adapter.Agent() == model.AgentClaudeCode {
-			return []string{adapter.SettingsPath(homeDir), adapter.MCPConfigPath(homeDir, "context7")}
+			return []string{claude.UserConfigPath(homeDir), adapter.SettingsPath(homeDir), adapter.MCPConfigPath(homeDir, "context7")}
 		}
 		return []string{adapter.MCPConfigPath(homeDir, "context7")}
 	case model.StrategyMergeIntoSettings, model.StrategyMCPConfigFile:
@@ -737,7 +738,7 @@ func context7Operations(adapter agents.Adapter, homeDir string) []operation {
 	case model.StrategySeparateMCPFiles:
 		if adapter.Agent() == model.AgentClaudeCode {
 			legacyPath := adapter.MCPConfigPath(homeDir, "context7")
-			return []operation{rewriteJSONFile(adapter.SettingsPath(homeDir), jsonPath{"mcpServers", "context7"}), removeManagedContext7File(legacyPath), removeDirIfEmpty(filepath.Dir(legacyPath))}
+			return []operation{rewriteJSONFile(claude.UserConfigPath(homeDir), jsonPath{"mcpServers", "context7"}), rewriteJSONFile(adapter.SettingsPath(homeDir), jsonPath{"mcpServers", "context7"}), removeManagedContext7File(legacyPath), removeDirIfEmpty(filepath.Dir(legacyPath))}
 		}
 		path := adapter.MCPConfigPath(homeDir, "context7")
 		return []operation{removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
@@ -766,6 +767,9 @@ func engramTargets(adapter agents.Adapter, homeDir string) []string {
 	targets := make([]string, 0, 3)
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
+		if adapter.Agent() == model.AgentClaudeCode {
+			targets = append(targets, claude.UserConfigPath(homeDir))
+		}
 		targets = append(targets, adapter.MCPConfigPath(homeDir, "engram"))
 	case model.StrategyMergeIntoSettings:
 		targets = append(targets, adapter.SettingsPath(homeDir))
@@ -785,6 +789,9 @@ func engramOperations(adapter agents.Adapter, homeDir string) []operation {
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
 		path := adapter.MCPConfigPath(homeDir, "engram")
+		if adapter.Agent() == model.AgentClaudeCode {
+			return []operation{rewriteJSONFile(claude.UserConfigPath(homeDir), jsonPath{"mcpServers", "engram"}), removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
+		}
 		return []operation{removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
 	case model.StrategyMergeIntoSettings:
 		path := adapter.SettingsPath(homeDir)
