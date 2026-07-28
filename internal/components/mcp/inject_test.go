@@ -598,6 +598,33 @@ func TestInjectClaudeSettingsInertBlockCleanup(t *testing.T) {
 	}
 }
 
+// TestInjectClaudeTightensModeOnNoOpRun: WriteFileAtomic skips byte-identical
+// writes, so the mode must be enforced even when nothing changes (review
+// finding on PR #1909).
+func TestInjectClaudeTightensModeOnNoOpRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Go reports NTFS ACLs as 0666; POSIX mode assertions do not apply")
+	}
+	home := t.TempDir()
+	userConfigPath := filepath.Join(home, ".claude.json")
+	if _, err := Inject(home, claudeAdapter()); err != nil {
+		t.Fatalf("Inject() first error = %v", err)
+	}
+	if err := os.Chmod(userConfigPath, 0o644); err != nil {
+		t.Fatalf("Chmod(loosen) error = %v", err)
+	}
+	if _, err := Inject(home, claudeAdapter()); err != nil {
+		t.Fatalf("Inject() second error = %v", err)
+	}
+	info, err := os.Stat(userConfigPath)
+	if err != nil {
+		t.Fatalf("Stat error = %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("no-op run left mode %o; want 0600 re-tightened", mode)
+	}
+}
+
 func TestInjectClaudeRefusesCorruptUserConfig(t *testing.T) {
 	home := t.TempDir()
 	userConfigPath := filepath.Join(home, ".claude.json")

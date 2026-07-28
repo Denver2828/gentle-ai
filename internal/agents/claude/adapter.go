@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -94,23 +95,55 @@ func UserConfigPath(homeDir string) string {
 
 // MergeUserConfig merges overlayJSON into ~/.claude.json with the guarantees
 // that file demands: an unparsable base aborts instead of being reset to {},
-// and the write stays at 0600. Both MCP injectors share this as the single
-// enforcement point for the non-destructive requirement of issue #1868.
+// the file always ends at 0600, and a base that moves underneath the merge
+// (Claude Code itself, or a concurrent gentle-ai run) triggers a re-read and
+// retry so a stale merge cannot drop a registration written in between. Both
+// MCP injectors share this as the single enforcement point for issue #1868.
 func MergeUserConfig(homeDir string, overlayJSON []byte) (filemerge.WriteResult, string, error) {
 	configPath := UserConfigPath(homeDir)
+	const maxAttempts = 4
+	for attempt := 1; ; attempt++ {
+		raw, err := readUserConfigBase(configPath)
+		if err != nil {
+			return filemerge.WriteResult{}, configPath, err
+		}
+		if _, parseErr := filemerge.UnmarshalJSONObject(raw); parseErr != nil {
+			return filemerge.WriteResult{}, configPath, fmt.Errorf("refusing to modify %q: it holds the Claude Code session and could not be parsed as JSON: %w", configPath, parseErr)
+		}
+		merged, err := filemerge.MergeJSONObjects(raw, overlayJSON)
+		if err != nil {
+			return filemerge.WriteResult{}, configPath, err
+		}
+		current, err := readUserConfigBase(configPath)
+		if err != nil {
+			return filemerge.WriteResult{}, configPath, err
+		}
+		if !bytes.Equal(current, raw) {
+			if attempt < maxAttempts {
+				continue
+			}
+			return filemerge.WriteResult{}, configPath, fmt.Errorf("gave up merging into %q after %d attempts: the file kept changing underneath the merge", configPath, maxAttempts)
+		}
+		writeResult, err := filemerge.WriteFileAtomic(configPath, merged, 0o600)
+		if err != nil {
+			return filemerge.WriteResult{}, configPath, err
+		}
+		// WriteFileAtomic skips the write (and with it the mode) when the
+		// content is already correct; the OAuth-bearing file must end at
+		// 0600 regardless of whether bytes moved.
+		if chmodErr := os.Chmod(configPath, 0o600); chmodErr != nil {
+			return writeResult, configPath, fmt.Errorf("tighten mode of %q: %w", configPath, chmodErr)
+		}
+		return writeResult, configPath, nil
+	}
+}
+
+func readUserConfigBase(configPath string) ([]byte, error) {
 	raw, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
-		return filemerge.WriteResult{}, configPath, fmt.Errorf("read %q: %w", configPath, err)
+		return nil, fmt.Errorf("read %q: %w", configPath, err)
 	}
-	if _, parseErr := filemerge.UnmarshalJSONObject(raw); parseErr != nil {
-		return filemerge.WriteResult{}, configPath, fmt.Errorf("refusing to modify %q: it holds the Claude Code session and could not be parsed as JSON: %w", configPath, parseErr)
-	}
-	merged, err := filemerge.MergeJSONObjects(raw, overlayJSON)
-	if err != nil {
-		return filemerge.WriteResult{}, configPath, err
-	}
-	writeResult, err := filemerge.WriteFileAtomic(configPath, merged, 0o600)
-	return writeResult, configPath, err
+	return raw, nil
 }
 
 func (a *Adapter) GlobalConfigDir(homeDir string) string {
