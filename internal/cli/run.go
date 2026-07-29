@@ -1745,10 +1745,12 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			switch adapter.MCPStrategy() {
 			case model.StrategySeparateMCPFiles:
 				if adapter.Agent() == model.AgentClaudeCode {
-					// Engram injection registers into ~/.claude.json and removes
-					// the legacy ~/.claude/mcp/engram.json, so the registry is
-					// the file verification and backup must track (issue #1868).
-					paths = append(paths, claude.UserConfigPath(homeDir))
+					// Engram injection registers into .claude.json under the
+					// scoped injection dir and removes the legacy mcp/engram.json,
+					// so the registry is the file verification and backup must
+					// track (issue #1868). targetDir mirrors the dir the
+					// injector receives for this component and scope.
+					paths = append(paths, claude.UserConfigPath(targetDir))
 					break
 				}
 				paths = append(paths, adapter.MCPConfigPath(targetDir, "engram"))
