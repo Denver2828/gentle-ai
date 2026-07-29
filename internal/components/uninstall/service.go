@@ -738,7 +738,7 @@ func context7Operations(adapter agents.Adapter, homeDir string) []operation {
 	case model.StrategySeparateMCPFiles:
 		if adapter.Agent() == model.AgentClaudeCode {
 			legacyPath := adapter.MCPConfigPath(homeDir, "context7")
-			return []operation{rewriteJSONFile(claude.UserConfigPath(homeDir), jsonPath{"mcpServers", "context7"}), rewriteJSONFile(adapter.SettingsPath(homeDir), jsonPath{"mcpServers", "context7"}), removeManagedContext7File(legacyPath), removeDirIfEmpty(filepath.Dir(legacyPath))}
+			return []operation{rewriteClaudeUserConfig(homeDir, jsonPath{"mcpServers", "context7"}), rewriteJSONFile(adapter.SettingsPath(homeDir), jsonPath{"mcpServers", "context7"}), removeManagedContext7File(legacyPath), removeDirIfEmpty(filepath.Dir(legacyPath))}
 		}
 		path := adapter.MCPConfigPath(homeDir, "context7")
 		return []operation{removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
@@ -790,7 +790,7 @@ func engramOperations(adapter agents.Adapter, homeDir string) []operation {
 	case model.StrategySeparateMCPFiles:
 		path := adapter.MCPConfigPath(homeDir, "engram")
 		if adapter.Agent() == model.AgentClaudeCode {
-			return []operation{rewriteJSONFile(claude.UserConfigPath(homeDir), jsonPath{"mcpServers", "engram"}), removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
+			return []operation{rewriteClaudeUserConfig(homeDir, jsonPath{"mcpServers", "engram"}), removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
 		}
 		return []operation{removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
 	case model.StrategyMergeIntoSettings:
@@ -884,6 +884,49 @@ func rewriteJSONFile(path string, jsonPaths ...jsonPath) operation {
 			}
 			_, err = filemerge.WriteFileAtomic(path, updated, perm)
 			if err != nil {
+				return false, false, err
+			}
+			return true, false, nil
+		},
+	}
+}
+
+// rewriteClaudeUserConfig removes managed entries from ~/.claude.json under
+// the shared gentle-ai advisory lock. Unlike rewriteJSONFile it never deletes
+// the file when the result is empty: the registry belongs to Claude Code (it
+// holds the OAuth session whenever one exists), and Claude Code may repopulate
+// it between our read and a removal, so uninstall only ever writes the
+// emptied object back with the file's mode preserved.
+func rewriteClaudeUserConfig(homeDir string, jsonPaths ...jsonPath) operation {
+	path := claude.UserConfigPath(homeDir)
+	return operation{
+		typeID: opRewriteFile,
+		path:   path,
+		apply: func(path string) (bool, bool, error) {
+			release, err := claude.LockUserConfig(homeDir)
+			if err != nil {
+				return false, false, err
+			}
+			defer func() { _ = release() }()
+			raw, err := readManagedFile(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return false, false, nil
+				}
+				return false, false, fmt.Errorf("read json file %q: %w", path, err)
+			}
+			updated, changed, err := removeJSONPaths(raw, jsonPaths...)
+			if err != nil {
+				return false, false, fmt.Errorf("clean json file %q: %w", path, err)
+			}
+			if !changed {
+				return false, false, nil
+			}
+			perm := os.FileMode(0o600)
+			if info, statErr := os.Lstat(path); statErr == nil {
+				perm = info.Mode().Perm()
+			}
+			if _, err := filemerge.WriteFileAtomic(path, updated, perm); err != nil {
 				return false, false, err
 			}
 			return true, false, nil

@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/backup"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/communitytool"
@@ -402,6 +404,59 @@ func TestComponentOperationsContext7ClaudeRemovesSettingsAndManagedLegacyFile(t 
 	}
 	if _, ok := mcpServers["engram"]; !ok {
 		t.Fatalf("settings lost unrelated mcpServers.engram: %#v", settings)
+	}
+}
+
+func TestComponentOperationsClaudeNeverDeleteUserRegistry(t *testing.T) {
+	homeDir := t.TempDir()
+	workspaceDir := t.TempDir()
+
+	svc, err := NewService(homeDir, workspaceDir, "dev")
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	adapter, ok := svc.registry.Get(model.AgentClaudeCode)
+	if !ok {
+		t.Fatal("Claude adapter not found in registry")
+	}
+
+	// The registry holds ONLY managed servers, so removing them empties it.
+	// rewriteJSONFile would delete the emptied file; ~/.claude.json must
+	// survive because Claude Code owns it and may repopulate it (it carries
+	// the OAuth session whenever one exists).
+	registryPath := claude.UserConfigPath(homeDir)
+	seed := []byte(`{"mcpServers":{"context7":{"command":"npx"},"engram":{"command":"engram"}}}`)
+	if err := os.WriteFile(registryPath, seed, 0o600); err != nil {
+		t.Fatalf("WriteFile(registry) error = %v", err)
+	}
+
+	for _, component := range []model.ComponentID{model.ComponentContext7, model.ComponentEngram} {
+		ops, _, err := svc.componentOperations(adapter, component)
+		if err != nil {
+			t.Fatalf("componentOperations(%v) error = %v", component, err)
+		}
+		for _, op := range ops {
+			if _, _, err := op.apply(op.path); err != nil {
+				t.Fatalf("operation %v on %q error = %v", op.typeID, op.path, err)
+			}
+		}
+	}
+
+	info, err := os.Stat(registryPath)
+	if err != nil {
+		t.Fatalf("~/.claude.json must survive removing the last managed server: %v", err)
+	}
+	registry := readJSONFileForTest(t, registryPath)
+	if servers, ok := registry["mcpServers"].(map[string]any); ok {
+		if _, still := servers["context7"]; still {
+			t.Fatalf("registry still contains mcpServers.context7: %#v", registry)
+		}
+		if _, still := servers["engram"]; still {
+			t.Fatalf("registry still contains mcpServers.engram: %#v", registry)
+		}
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("registry mode widened to %v, want 0600", info.Mode().Perm())
 	}
 }
 
