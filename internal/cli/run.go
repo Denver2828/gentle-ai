@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	codexagent "github.com/gentleman-programming/gentle-ai/v2/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/kimi"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/assets"
@@ -1671,6 +1672,21 @@ func backupTargets(homeDir, workspaceDir string, scope InstallScope, selection m
 	for _, path := range routingGuidancePaths(homeDir, workspaceDir, scope, adapters) {
 		paths[path] = struct{}{}
 	}
+	// The Claude MCP injectors mutate more files than the component paths
+	// report: the inert mcpServers block is removed best-effort from
+	// settings.json and the legacy ~/.claude/mcp registrations are migrated
+	// into ~/.claude.json. Snapshot them so those mutations stay restorable
+	// even though they are not required-file verification targets (#1794).
+	if hasComponent(resolved.OrderedComponents, model.ComponentContext7) || hasComponent(resolved.OrderedComponents, model.ComponentEngram) {
+		for _, adapter := range adapters {
+			if adapter.Agent() != model.AgentClaudeCode {
+				continue
+			}
+			paths[adapter.SettingsPath(homeDir)] = struct{}{}
+			paths[adapter.MCPConfigPath(homeDir, "context7")] = struct{}{}
+			paths[adapter.MCPConfigPath(homeDir, "engram")] = struct{}{}
+		}
+	}
 	if containsAgent(resolved.Agents, model.AgentPi) {
 		for _, path := range communitytool.PiCodeGraphPaths(homeDir, workspaceDir) {
 			paths[path] = struct{}{}
@@ -1728,6 +1744,13 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 		case model.ComponentEngram:
 			switch adapter.MCPStrategy() {
 			case model.StrategySeparateMCPFiles:
+				if adapter.Agent() == model.AgentClaudeCode {
+					// Engram injection registers into ~/.claude.json and removes
+					// the legacy ~/.claude/mcp/engram.json, so the registry is
+					// the file verification and backup must track (issue #1868).
+					paths = append(paths, claude.UserConfigPath(homeDir))
+					break
+				}
 				paths = append(paths, adapter.MCPConfigPath(targetDir, "engram"))
 			case model.StrategyMergeIntoSettings:
 				// MCP settings are always merged into the global config file, not the
@@ -1827,9 +1850,10 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			switch adapter.MCPStrategy() {
 			case model.StrategySeparateMCPFiles:
 				if adapter.Agent() == model.AgentClaudeCode {
-					if p := adapter.SettingsPath(homeDir); p != "" {
-						paths = append(paths, p)
-					}
+					// Context7 injection writes ~/.claude.json; settings.json is
+					// only mutated best-effort and may not exist, so it belongs
+					// in backupTargets, not in the required-file verification.
+					paths = append(paths, claude.UserConfigPath(homeDir))
 					break
 				}
 				paths = append(paths, adapter.MCPConfigPath(homeDir, "context7"))

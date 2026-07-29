@@ -355,19 +355,59 @@ func TestComponentPathsContext7KimiIncludesMCPConfig(t *testing.T) {
 	}
 }
 
-func TestComponentPathsContext7ClaudeUsesSettingsFile(t *testing.T) {
+// TestComponentPathsClaudeMCPUsesUserRegistry pins the Claude MCP components
+// to the file injection actually writes: ~/.claude.json (issue #1868).
+// settings.json is only mutated best-effort and may not exist, and the legacy
+// ~/.claude/mcp files are removed by injection, so verifying either would
+// fail on a healthy install.
+func TestComponentPathsClaudeMCPUsesUserRegistry(t *testing.T) {
 	home := t.TempDir()
 	adapters := resolveAdapters([]model.AgentID{model.AgentClaudeCode})
+	registry := filepath.Join(home, ".claude.json")
 
-	paths := componentPaths(home, model.Selection{}, adapters, model.ComponentContext7)
-
-	want := filepath.Join(home, ".claude", "settings.json")
-	if !containsPath(paths, want) {
-		t.Fatalf("componentPaths(context7,claude) missing %q\npaths=%v", want, paths)
+	for _, tt := range []struct {
+		component model.ComponentID
+		legacy    string
+	}{
+		{model.ComponentContext7, filepath.Join(home, ".claude", "mcp", "context7.json")},
+		{model.ComponentEngram, filepath.Join(home, ".claude", "mcp", "engram.json")},
+	} {
+		paths := componentPaths(home, model.Selection{}, adapters, tt.component)
+		if !containsPath(paths, registry) {
+			t.Fatalf("componentPaths(%v,claude) missing %q\npaths=%v", tt.component, registry, paths)
+		}
+		if containsPath(paths, tt.legacy) {
+			t.Fatalf("componentPaths(%v,claude) should not verify removed legacy path %q\npaths=%v", tt.component, tt.legacy, paths)
+		}
+		settings := filepath.Join(home, ".claude", "settings.json")
+		if tt.component == model.ComponentContext7 && containsPath(paths, settings) {
+			t.Fatalf("componentPaths(%v,claude) should not require possibly-absent %q\npaths=%v", tt.component, settings, paths)
+		}
 	}
-	legacy := filepath.Join(home, ".claude", "mcp", "context7.json")
-	if containsPath(paths, legacy) {
-		t.Fatalf("componentPaths(context7,claude) should not verify legacy path %q\npaths=%v", legacy, paths)
+}
+
+// TestBackupTargetsSnapshotClaudeMCPMutations pins that the pre-install
+// snapshot covers every file the Claude MCP injectors may mutate beyond the
+// verification list: the best-effort settings.json cleanup and the legacy
+// ~/.claude/mcp migrations must stay restorable (#1794).
+func TestBackupTargetsSnapshotClaudeMCPMutations(t *testing.T) {
+	home := t.TempDir()
+	resolved := planner.ResolvedPlan{
+		Agents:            []model.AgentID{model.AgentClaudeCode},
+		OrderedComponents: []model.ComponentID{model.ComponentContext7, model.ComponentEngram},
+	}
+
+	targets := backupTargets(home, "", ScopeGlobal, model.Selection{}, resolved)
+
+	for _, want := range []string{
+		filepath.Join(home, ".claude.json"),
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".claude", "mcp", "context7.json"),
+		filepath.Join(home, ".claude", "mcp", "engram.json"),
+	} {
+		if !containsPath(targets, want) {
+			t.Fatalf("backupTargets missing %q\ntargets=%v", want, targets)
+		}
 	}
 }
 
