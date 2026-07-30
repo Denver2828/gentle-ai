@@ -137,10 +137,11 @@ func MergeUserConfig(homeDir string, overlayJSON []byte) (filemerge.WriteResult,
 			return filemerge.WriteResult{}, configPath, err
 		}
 		// WriteFileAtomic skips the write (and with it the mode) when the
-		// content is already correct; the OAuth-bearing file must end at
-		// 0600 regardless of whether bytes moved.
-		if chmodErr := os.Chmod(configPath, 0o600); chmodErr != nil {
-			return writeResult, configPath, fmt.Errorf("tighten mode of %q: %w", configPath, chmodErr)
+		// content is already correct; the OAuth-bearing file must end
+		// owner-only regardless of whether bytes moved — chmod 0600 on
+		// POSIX, a protected owner/SYSTEM/Administrators DACL on Windows.
+		if secureErr := SecureUserConfig(configPath); secureErr != nil {
+			return writeResult, configPath, secureErr
 		}
 		return writeResult, configPath, nil
 	}

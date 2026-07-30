@@ -927,6 +927,11 @@ func rewriteClaudeUserConfig(homeDir string, jsonPaths ...jsonPath) operation {
 			if _, err := filemerge.WriteFileAtomic(path, updated, perm); err != nil {
 				return false, false, err
 			}
+			// The atomic rename replaces the file, dropping the restrictive
+			// Windows DACL; re-apply the owner-only protection.
+			if err := claude.SecureUserConfig(path); err != nil {
+				return false, false, err
+			}
 			return true, false, nil
 		},
 	}
