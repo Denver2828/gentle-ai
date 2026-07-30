@@ -54,6 +54,49 @@ func assertArgsHaveToolsAgent(t *testing.T, path string) {
 	}
 }
 
+// readClaudeUserConfigEngramEntry reads mcpServers.engram from ~/.claude.json,
+// the only user-scope file Claude Code loads MCP servers from (issue #1868).
+func readClaudeUserConfigEngramEntry(t *testing.T, home string) map[string]any {
+	t.Helper()
+	userConfigPath := filepath.Join(home, ".claude.json")
+	raw, err := os.ReadFile(userConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(.claude.json) error = %v", err)
+	}
+	root := map[string]any{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("Unmarshal(.claude.json) error = %v", err)
+	}
+	servers, ok := root["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf(".claude.json missing mcpServers; got %s", raw)
+	}
+	engram, ok := servers["engram"].(map[string]any)
+	if !ok {
+		t.Fatalf(".claude.json missing mcpServers.engram; got %s", raw)
+	}
+	return engram
+}
+
+func TestInjectClaudeRefusesCorruptUserConfig(t *testing.T) {
+	home := t.TempDir()
+	userConfigPath := filepath.Join(home, ".claude.json")
+	corrupt := []byte("{ this is not json")
+	if err := os.WriteFile(userConfigPath, corrupt, 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt user config) error = %v", err)
+	}
+	if _, err := Inject(home, claudeAdapter()); err == nil {
+		t.Fatalf("Inject() error = nil; want refusal on corrupt ~/.claude.json")
+	}
+	after, err := os.ReadFile(userConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(user config) error = %v", err)
+	}
+	if string(after) != string(corrupt) {
+		t.Fatalf("corrupt ~/.claude.json must be left byte-identical; got %s", after)
+	}
+}
+
 func TestInjectClaudeWritesMCPConfig(t *testing.T) {
 	home := t.TempDir()
 
@@ -65,34 +108,26 @@ func TestInjectClaudeWritesMCPConfig(t *testing.T) {
 		t.Fatalf("Inject() changed = false")
 	}
 
-	// Check MCP JSON file was created.
-	mcpPath := filepath.Join(home, ".claude", "mcp", "engram.json")
-	mcpContent, err := os.ReadFile(mcpPath)
-	if err != nil {
-		t.Fatalf("ReadFile(engram.json) error = %v", err)
-	}
-
-	// Parse the JSON and validate the "command" key exists and references engram.
-	// The command may be an absolute path (if engram is on PATH) or the relative
-	// string "engram" (if not found). Both are valid.
-	var parsed map[string]any
-	if err := json.Unmarshal(mcpContent, &parsed); err != nil {
-		t.Fatalf("Unmarshal(engram.json) error = %v", err)
-	}
-	cmd, ok := parsed["command"].(string)
+	// The registration must land in ~/.claude.json — the only user-scope file
+	// Claude Code reads MCP servers from (issue #1868).
+	engram := readClaudeUserConfigEngramEntry(t, home)
+	cmd, ok := engram["command"].(string)
 	if !ok || cmd == "" {
-		t.Fatalf("engram.json missing or empty command field; got: %s", mcpContent)
+		t.Fatalf(".claude.json mcpServers.engram missing command; got %#v", engram)
 	}
-	// Command must either be the literal "engram" or an absolute path ending in "engram".
 	base := filepath.Base(cmd)
 	if base != "engram" && base != "engram.exe" {
-		t.Fatalf("engram.json command %q does not reference engram binary; got: %s", cmd, mcpContent)
+		t.Fatalf("engram command %q does not reference engram binary", cmd)
 	}
-	if _, ok := parsed["args"]; !ok {
-		t.Fatal("engram.json missing args field")
+	args := fmt.Sprintf("%v", engram["args"])
+	if !strings.Contains(args, "--tools=agent") {
+		t.Fatalf("engram args = %s; want --tools=agent", args)
 	}
-	// RED: must include --tools=agent
-	assertArgsHaveToolsAgent(t, mcpPath)
+
+	// The dead separate file must not be created.
+	if _, err := os.Stat(filepath.Join(home, ".claude", "mcp", "engram.json")); !os.IsNotExist(err) {
+		t.Fatalf("engram must not be written to ~/.claude/mcp/engram.json; stat err = %v", err)
+	}
 }
 
 func TestInjectClaudeWritesProtocolSection(t *testing.T) {
@@ -802,23 +837,24 @@ func TestInjectClaudePreservesAbsoluteCommandFromEngramSetup(t *testing.T) {
 		t.Fatalf("WriteFile(engram.json) error = %v", err)
 	}
 
-	// Now run Inject — should NOT overwrite the absolute command.
+	// Now run Inject — the absolute command must survive the migration into
+	// ~/.claude.json, and the dead separate file must be removed (issue #1868).
 	_, err := Inject(home, claudeAdapter())
 	if err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
 
-	content, err := os.ReadFile(mcpPath)
-	if err != nil {
-		t.Fatalf("ReadFile(engram.json) error = %v", err)
+	engram := readClaudeUserConfigEngramEntry(t, home)
+	if engram["command"] != absPath {
+		t.Fatalf("engram command = %#v; want absolute path %q preserved through migration", engram["command"], absPath)
 	}
-
-	text := string(content)
-	if !strings.Contains(text, absPath) {
-		t.Fatalf("Inject() overwrote absolute command path; want %q preserved, got:\n%s", absPath, text)
+	args := fmt.Sprintf("%v", engram["args"])
+	if !strings.Contains(args, "--tools=agent") {
+		t.Fatalf("engram args = %s; want --tools=agent", args)
 	}
-	// Still must have --tools=agent.
-	assertArgsHaveToolsAgent(t, mcpPath)
+	if _, statErr := os.Stat(mcpPath); !os.IsNotExist(statErr) {
+		t.Fatalf("dead ~/.claude/mcp/engram.json must be removed after migration; stat err = %v", statErr)
+	}
 }
 
 // TestInjectClaudePreservesAbsoluteCommandIsIdempotent verifies that calling
@@ -854,13 +890,10 @@ func TestInjectClaudePreservesAbsoluteCommandIsIdempotent(t *testing.T) {
 		t.Fatalf("Inject() second changed = true after absolute-path setup; want idempotent (no change)")
 	}
 
-	// Absolute path must still be present.
-	content, err := os.ReadFile(mcpPath)
-	if err != nil {
-		t.Fatalf("ReadFile(engram.json) error = %v", err)
-	}
-	if !strings.Contains(string(content), absPath) {
-		t.Fatalf("absolute command path %q was lost after second Inject(); got:\n%s", absPath, string(content))
+	// Absolute path must survive both runs in ~/.claude.json.
+	engram := readClaudeUserConfigEngramEntry(t, home)
+	if engram["command"] != absPath {
+		t.Fatalf("absolute command path %q was lost after second Inject(); got %#v", absPath, engram["command"])
 	}
 	_ = first // first result not the focus of this test
 }
@@ -891,18 +924,17 @@ func TestInjectClaudeAddsToolsAgentWhenSetupWritesBareArgs(t *testing.T) {
 		t.Fatalf("Inject() error = %v", err)
 	}
 
-	content, err := os.ReadFile(mcpPath)
-	if err != nil {
-		t.Fatalf("ReadFile(engram.json) error = %v", err)
-	}
-	text := string(content)
+	engram := readClaudeUserConfigEngramEntry(t, home)
 
 	// Absolute path must be preserved.
-	if !strings.Contains(text, absPath) {
-		t.Fatalf("absolute path %q was lost; got:\n%s", absPath, text)
+	if engram["command"] != absPath {
+		t.Fatalf("absolute path %q was lost; got %#v", absPath, engram["command"])
 	}
 	// --tools=agent must be added.
-	assertArgsHaveToolsAgent(t, mcpPath)
+	args := fmt.Sprintf("%v", engram["args"])
+	if !strings.Contains(args, "--tools=agent") {
+		t.Fatalf("engram args = %s; want --tools=agent", args)
+	}
 }
 
 func TestInjectClaudeMigratesCellarCommandToStablePath(t *testing.T) {
@@ -931,18 +963,18 @@ func TestInjectClaudeMigratesCellarCommandToStablePath(t *testing.T) {
 		t.Fatalf("Inject() changed = false; expected Cellar command migration")
 	}
 
-	content, err := os.ReadFile(mcpPath)
-	if err != nil {
-		t.Fatalf("ReadFile(engram.json) error = %v", err)
+	engram := readClaudeUserConfigEngramEntry(t, home)
+	cmd, _ := engram["command"].(string)
+	if strings.Contains(cmd, "/Cellar/") {
+		t.Fatalf("engram command still contains versioned Homebrew Cellar path; got %q", cmd)
 	}
-	text := string(content)
-	if strings.Contains(text, "/Cellar/") {
-		t.Fatalf("engram.json still contains versioned Homebrew Cellar path; got:\n%s", text)
+	if cmd != "/usr/local/bin/engram" {
+		t.Fatalf("engram command did not migrate to stable Homebrew symlink; got %q", cmd)
 	}
-	if !strings.Contains(text, "/usr/local/bin/engram") {
-		t.Fatalf("engram.json did not migrate to stable Homebrew symlink; got:\n%s", text)
+	args := fmt.Sprintf("%v", engram["args"])
+	if !strings.Contains(args, "--tools=agent") {
+		t.Fatalf("engram args = %s; want --tools=agent", args)
 	}
-	assertArgsHaveToolsAgent(t, mcpPath)
 }
 
 func TestInjectCodexIsIdempotent(t *testing.T) {

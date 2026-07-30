@@ -767,6 +767,9 @@ func engramTargets(adapter agents.Adapter, homeDir string) []string {
 	targets := make([]string, 0, 3)
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
+		if adapter.Agent() == model.AgentClaudeCode {
+			targets = append(targets, claude.UserConfigPath(homeDir))
+		}
 		targets = append(targets, adapter.MCPConfigPath(homeDir, "engram"))
 	case model.StrategyMergeIntoSettings:
 		targets = append(targets, adapter.SettingsPath(homeDir))
@@ -786,6 +789,9 @@ func engramOperations(adapter agents.Adapter, homeDir string) []operation {
 	switch adapter.MCPStrategy() {
 	case model.StrategySeparateMCPFiles:
 		path := adapter.MCPConfigPath(homeDir, "engram")
+		if adapter.Agent() == model.AgentClaudeCode {
+			return []operation{rewriteClaudeUserConfig(homeDir, jsonPath{"mcpServers", "engram"}), removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
+		}
 		return []operation{removeFile(path), removeDirIfEmpty(filepath.Dir(path))}
 	case model.StrategyMergeIntoSettings:
 		path := adapter.SettingsPath(homeDir)

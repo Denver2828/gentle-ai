@@ -1336,9 +1336,16 @@ func (s componentApplyStep) Run() error {
 				Version:                     engramVersion,
 			}
 			var err error
-			if adapter.Agent() == model.AgentOpenClaw {
+			switch {
+			case adapter.Agent() == model.AgentOpenClaw:
 				_, err = engram.InjectWithPromptDir(s.homeDir, s.workspaceDir, adapter)
-			} else {
+			case adapter.Agent() == model.AgentClaudeCode:
+				// Claude Code reads user-scope MCP servers only from
+				// ~/.claude.json; a workspace-scoped copy of that file is a
+				// dead path, so the registry write always targets the home
+				// while prompt delivery keeps its scoped dir (issue #1868).
+				_, err = engram.InjectWithOptions(s.homeDir, adapter, engramOpts)
+			default:
 				targetDir := componentInjectionDirScoped(s.homeDir, s.workspaceDir, s.scope, adapter)
 				_, err = engram.InjectWithOptions(targetDir, adapter, engramOpts)
 			}
@@ -1729,6 +1736,12 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 		case model.ComponentEngram:
 			switch adapter.MCPStrategy() {
 			case model.StrategySeparateMCPFiles:
+				if adapter.Agent() == model.AgentClaudeCode {
+					// Engram registers in the home user registry in every
+					// scope; the legacy mcp/engram.json is removed (#1868).
+					paths = append(paths, claude.UserConfigPath(homeDir))
+					break
+				}
 				paths = append(paths, adapter.MCPConfigPath(targetDir, "engram"))
 			case model.StrategyMergeIntoSettings:
 				// MCP settings are always merged into the global config file, not the

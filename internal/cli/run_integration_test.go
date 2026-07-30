@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1798,7 +1799,9 @@ func TestRunInstallUpgradeIdempotency(t *testing.T) {
 
 	// Capture all relevant output files after the first run.
 	claudeMDPath := filepath.Join(home, ".claude", "CLAUDE.md")
-	engramMCPPath := filepath.Join(home, ".claude", "mcp", "engram.json")
+	// Engram registers into the Claude Code user registry (issue #1868); the
+	// legacy ~/.claude/mcp/engram.json is removed by injection.
+	engramMCPPath := filepath.Join(home, ".claude.json")
 
 	claudeMDAfterRun1, err := os.ReadFile(claudeMDPath)
 	if err != nil {
@@ -1859,13 +1862,20 @@ func TestRunInstallUpgradeIdempotency(t *testing.T) {
 		}
 	}
 
-	// 4. Engram MCP JSON must not contain duplicate keys.
-	// A simple structural check: "command" key should appear exactly once.
-	engramJSON := string(engramMCPAfterRun2)
-	commandCount := strings.Count(engramJSON, `"command"`)
-	if commandCount != 1 {
-		t.Errorf("engram MCP JSON contains %d occurrences of \"command\", want exactly 1:\n%s",
-			commandCount, engramJSON)
+	// 4. The user registry must hold exactly one engram registration with a
+	// resolvable command, and the legacy per-server file must stay gone.
+	var registry map[string]any
+	if err := json.Unmarshal(engramMCPAfterRun2, &registry); err != nil {
+		t.Fatalf("user registry unparsable after run 2: %v", err)
+	}
+	servers, _ := registry["mcpServers"].(map[string]any)
+	engramServer, _ := servers["engram"].(map[string]any)
+	if command, _ := engramServer["command"].(string); command == "" {
+		t.Errorf("user registry missing mcpServers.engram.command after run 2: %s", engramMCPAfterRun2)
+	}
+	legacyEngramPath := filepath.Join(home, ".claude", "mcp", "engram.json")
+	if _, err := os.Stat(legacyEngramPath); !os.IsNotExist(err) {
+		t.Errorf("legacy engram MCP file should not exist after run 2; stat err = %v", err)
 	}
 }
 
