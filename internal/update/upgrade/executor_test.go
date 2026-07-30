@@ -637,6 +637,32 @@ func TestConfigPathsForBackup_CoversManagedAgentPaths(t *testing.T) {
 	}
 }
 
+// TestConfigPathsForBackup_CoversClaudeUserRegistry pins ~/.claude.json as an
+// upgrade backup target: sync after an upgrade merges MCP registrations into
+// it (issue #1868), so the pre-upgrade snapshot must include it.
+func TestConfigPathsForBackup_CoversClaudeUserRegistry(t *testing.T) {
+	homeDir := t.TempDir()
+	claudeMd := filepath.Join(homeDir, ".claude", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(claudeMd), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(claudeMd, []byte("# Claude"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	registry := filepath.Join(homeDir, ".claude.json")
+	if err := os.WriteFile(registry, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+
+	paths := configPathsForBackup(homeDir)
+	for _, p := range paths {
+		if p == registry {
+			return
+		}
+	}
+	t.Fatalf("configPathsForBackup missing %q\npaths=%v", registry, paths)
+}
+
 // TestConfigPathsForBackup_HandlesEmptyDirs verifies that configPathsForBackup
 // returns a non-nil slice (possibly empty) when agent config directories don't exist.
 // It must NOT panic or error out — missing dirs simply contribute no paths.
@@ -1434,15 +1460,7 @@ func TestConfigPathsForBackup_EmptyStateAgentsFallsBackToFilesystem(t *testing.T
 func mockCmd(name string, args ...string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		if name == "echo" {
-			// `cmd /c echo` with nothing after it prints "ECHO is on", cmd's
-			// status line, not an empty line. A stub standing in for an unset
-			// `go env` value would then hand the caller that sentence as if it
-			// were the value, and callers that branch on "" take the wrong
-			// path. `echo.` is the form that emits a genuinely empty line.
-			if joined := strings.Join(args, " "); strings.TrimSpace(joined) != "" {
-				return exec.Command("cmd", "/c", "echo "+joined)
-			}
-			return exec.Command("cmd", "/c", "echo.")
+			return exec.Command("cmd", "/c", "echo "+strings.Join(args, " "))
 		}
 		if name == "true" {
 			return exec.Command("cmd", "/c", "exit 0")

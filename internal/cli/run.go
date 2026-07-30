@@ -1679,6 +1679,21 @@ func backupTargets(homeDir, workspaceDir string, scope InstallScope, selection m
 	for _, path := range routingGuidancePaths(homeDir, workspaceDir, scope, adapters) {
 		paths[path] = struct{}{}
 	}
+	// The Claude MCP injectors mutate more files than the component paths
+	// report: the inert mcpServers block is removed best-effort from
+	// settings.json and the legacy ~/.claude/mcp files are migrated into
+	// ~/.claude.json. Snapshot them so those mutations stay restorable even
+	// though they are not required-file verification targets (#1794).
+	if hasComponent(resolved.OrderedComponents, model.ComponentContext7) || hasComponent(resolved.OrderedComponents, model.ComponentEngram) {
+		for _, adapter := range adapters {
+			if adapter.Agent() != model.AgentClaudeCode {
+				continue
+			}
+			paths[adapter.SettingsPath(homeDir)] = struct{}{}
+			paths[adapter.MCPConfigPath(homeDir, "context7")] = struct{}{}
+			paths[adapter.MCPConfigPath(homeDir, "engram")] = struct{}{}
+		}
+	}
 	if containsAgent(resolved.Agents, model.AgentPi) {
 		for _, path := range communitytool.PiCodeGraphPaths(homeDir, workspaceDir) {
 			paths[path] = struct{}{}

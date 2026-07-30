@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/backup"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/gga"
@@ -213,6 +214,11 @@ func managedAgentBackupPaths(homeDir string, adapter agents.Adapter, diagnostics
 
 	if adapter.SupportsMCP() {
 		add(adapter.MCPConfigPath(homeDir, "engram"), adapter.MCPConfigPath(homeDir, "context7"))
+		if adapter.Agent() == model.AgentClaudeCode {
+			// MCP injection for Claude Code writes ~/.claude.json (issue
+			// #1868); back it up alongside the legacy per-server files.
+			add(claude.UserConfigPath(homeDir))
+		}
 	}
 
 	if adapter.SupportsOutputStyles() {

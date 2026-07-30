@@ -901,6 +901,11 @@ func rewriteClaudeUserConfig(homeDir string, jsonPaths ...jsonPath) operation {
 		typeID: opRewriteFile,
 		path:   path,
 		apply: func(path string) (bool, bool, error) {
+			release, err := claude.LockUserConfig(homeDir)
+			if err != nil {
+				return false, false, err
+			}
+			defer func() { _ = release() }()
 			raw, err := readManagedFile(path)
 			if err != nil {
 				if os.IsNotExist(err) {

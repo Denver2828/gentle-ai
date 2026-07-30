@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	piagent "github.com/gentleman-programming/gentle-ai/v2/internal/agents/pi"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/catalog"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
@@ -194,7 +195,7 @@ func InstallWithHome(id model.CommunityToolID, workspaceDir string, homeDir stri
 			continue
 		}
 		result.CommandsRun = append(result.CommandsRun, strings.Join(command, " "))
-		if err := runner.Run(command[0], command[1:]...); err != nil {
+		if err := runCodeGraphCommand(homeDir, targets, runner, command); err != nil {
 			return rollback(fmt.Errorf("run %q: %w", strings.Join(command, " "), err))
 		}
 	}
@@ -219,6 +220,21 @@ func InstallWithHome(id model.CommunityToolID, workspaceDir string, homeDir stri
 	}
 	result.ManualActions = append(result.ManualActions, "CodeGraph CLI was installed and supported agents were connected. Project indexes will be created automatically when an enabled agent opens inside a project.")
 	return result, nil
+}
+
+// runCodeGraphCommand runs one installer command, holding the gentle-ai
+// advisory lock for ~/.claude.json while a `codegraph` invocation targets the
+// Claude registry: the spawned CLI writes that file, and every gentle-ai
+// writer must go through the same serialization boundary (issue #1868).
+func runCodeGraphCommand(homeDir string, targets []string, runner Runner, command []string) error {
+	if command[0] == "codegraph" && slices.Contains(targets, "claude") {
+		release, err := claude.LockUserConfig(homeDir)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = release() }()
+	}
+	return runner.Run(command[0], command[1:]...)
 }
 
 func codeGraphCanRepairWithoutFullInstall(homeDir string, status Status) bool {

@@ -355,6 +355,30 @@ func TestComponentPathsContext7KimiIncludesMCPConfig(t *testing.T) {
 	}
 }
 
+// TestBackupTargetsSnapshotClaudeMCPMutations pins that the pre-install
+// snapshot covers every file the Claude MCP injectors may mutate beyond the
+// verification list, so those mutations stay restorable (#1794).
+func TestBackupTargetsSnapshotClaudeMCPMutations(t *testing.T) {
+	home := t.TempDir()
+	resolved := planner.ResolvedPlan{
+		Agents:            []model.AgentID{model.AgentClaudeCode},
+		OrderedComponents: []model.ComponentID{model.ComponentContext7, model.ComponentEngram},
+	}
+
+	targets := backupTargets(home, "", ScopeGlobal, model.Selection{}, resolved)
+
+	for _, want := range []string{
+		filepath.Join(home, ".claude.json"),
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".claude", "mcp", "context7.json"),
+		filepath.Join(home, ".claude", "mcp", "engram.json"),
+	} {
+		if !containsPath(targets, want) {
+			t.Fatalf("backupTargets missing %q\ntargets=%v", want, targets)
+		}
+	}
+}
+
 // TestComponentPathsContext7ClaudeUsesUserRegistry pins Claude Context7 to
 // the file injection actually writes: ~/.claude.json (issue #1868).
 // settings.json is only mutated best-effort and may not exist, and the legacy

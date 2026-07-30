@@ -3,15 +3,18 @@ package claude
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/capabilitymanifest"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/filemerge"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/installcmd"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/reviewtransaction"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/system"
 )
 
@@ -87,16 +90,25 @@ func (a *Adapter) InstallCommand(profile system.PlatformProfile) ([][]string, er
 // --- Config paths ---
 
 // UserConfigPath returns ~/.claude.json, the only user-scope file Claude Code
-// reads MCP servers from; it also carries the OAuth session — never reset it.
+// reads MCP server registrations from (see code.claude.com/docs/en/settings);
+// it also carries the OAuth session, so writers must never reset it.
 func UserConfigPath(homeDir string) string {
 	return filepath.Join(homeDir, ".claude.json")
 }
 
-// MergeUserConfig merges overlayJSON into ~/.claude.json: an unparsable base
-// aborts instead of being reset to {}, the file always ends at 0600, and a
-// base that moves underneath the merge is re-read and retried (issue #1868).
+// MergeUserConfig merges overlayJSON into ~/.claude.json with the guarantees
+// that file demands: an unparsable base aborts instead of being reset to {},
+// the file always ends at 0600, and a base that moves underneath the merge
+// (Claude Code itself, or a concurrent gentle-ai run) triggers a re-read and
+// retry so a stale merge cannot drop a registration written in between. Both
+// MCP injectors share this as the single enforcement point for issue #1868.
 func MergeUserConfig(homeDir string, overlayJSON []byte) (filemerge.WriteResult, string, error) {
 	configPath := UserConfigPath(homeDir)
+	release, err := LockUserConfig(homeDir)
+	if err != nil {
+		return filemerge.WriteResult{}, configPath, err
+	}
+	defer func() { _ = release() }()
 	const maxAttempts = 4
 	for attempt := 1; ; attempt++ {
 		raw, err := readUserConfigBase(configPath)
@@ -124,8 +136,9 @@ func MergeUserConfig(homeDir string, overlayJSON []byte) (filemerge.WriteResult,
 		if err != nil {
 			return filemerge.WriteResult{}, configPath, err
 		}
-		// WriteFileAtomic skips byte-identical writes (and their mode);
-		// the OAuth-bearing file must end at 0600 regardless.
+		// WriteFileAtomic skips the write (and with it the mode) when the
+		// content is already correct; the OAuth-bearing file must end at
+		// 0600 regardless of whether bytes moved.
 		if chmodErr := os.Chmod(configPath, 0o600); chmodErr != nil {
 			return writeResult, configPath, fmt.Errorf("tighten mode of %q: %w", configPath, chmodErr)
 		}
@@ -139,6 +152,33 @@ func readUserConfigBase(configPath string) ([]byte, error) {
 		return nil, fmt.Errorf("read %q: %w", configPath, err)
 	}
 	return raw, nil
+}
+
+// UserConfigLockPath returns the sidecar advisory lock every gentle-ai writer
+// of ~/.claude.json must hold. It lives inside ~/.claude so it never collides
+// with files Claude Code itself manages next to the registry.
+func UserConfigLockPath(homeDir string) string {
+	return filepath.Join(homeDir, ".claude", ".gentle-ai.claude-json.lock")
+}
+
+// LockUserConfig serializes gentle-ai's own writers of ~/.claude.json
+// (install, sync, upgrade, uninstall) across processes, closing the window
+// between the merge's final read and the atomic rename for every writer that
+// cooperates. Claude Code itself takes no lock, so the re-read/retry loop in
+// MergeUserConfig stays as the guard for that non-cooperating writer.
+func LockUserConfig(homeDir string) (func() error, error) {
+	lockPath := UserConfigLockPath(homeDir)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		lock, err := reviewtransaction.AcquireAuthorityFileLock(lockPath)
+		if err == nil {
+			return lock.Release, nil
+		}
+		if !errors.Is(err, reviewtransaction.ErrConcurrentUpdate) || !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("lock %q for a ~/.claude.json write: %w", lockPath, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (a *Adapter) GlobalConfigDir(homeDir string) string {

@@ -2,11 +2,14 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/system"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/versions"
@@ -158,5 +161,82 @@ func TestSlashCommands(t *testing.T) {
 	want := filepath.Join("/home/u", ".claude", "commands")
 	if got != want {
 		t.Fatalf("CommandsDir() = %q, want %q", got, want)
+	}
+}
+
+// TestMergeUserConfigSerializesConcurrentWriters drives eight concurrent
+// merges of distinct servers into the same registry. Without the advisory
+// lock the read-merge-write sequences interleave and drop registrations;
+// with it every writer must land, deterministically.
+func TestMergeUserConfigSerializesConcurrentWriters(t *testing.T) {
+	homeDir := t.TempDir()
+	if err := os.WriteFile(UserConfigPath(homeDir), []byte(`{"oauthAccount":{"emailAddress":"user@example.com"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 8
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		overlay := []byte(fmt.Sprintf(`{"mcpServers":{"server-%d":{"command":"cmd-%d"}}}`, i, i))
+		go func(overlay []byte) {
+			_, _, err := MergeUserConfig(homeDir, overlay)
+			errs <- err
+		}(overlay)
+	}
+	for i := 0; i < writers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent MergeUserConfig error = %v", err)
+		}
+	}
+
+	raw, err := os.ReadFile(UserConfigPath(homeDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("registry unparsable after concurrent merges: %v", err)
+	}
+	servers, _ := config["mcpServers"].(map[string]any)
+	for i := 0; i < writers; i++ {
+		if _, ok := servers[fmt.Sprintf("server-%d", i)]; !ok {
+			t.Fatalf("registration server-%d was lost by a concurrent merge: %#v", i, servers)
+		}
+	}
+	if _, ok := config["oauthAccount"]; !ok {
+		t.Fatalf("oauthAccount was lost by a concurrent merge: %#v", config)
+	}
+}
+
+// TestMergeUserConfigWaitsForLockHolder proves a merge cannot run while
+// another gentle-ai process holds the registry lock: it must wait for the
+// release instead of writing through it.
+func TestMergeUserConfigWaitsForLockHolder(t *testing.T) {
+	homeDir := t.TempDir()
+	release, err := LockUserConfig(homeDir)
+	if err != nil {
+		t.Fatalf("LockUserConfig() error = %v", err)
+	}
+
+	merged := make(chan error, 1)
+	go func() {
+		_, _, err := MergeUserConfig(homeDir, []byte(`{"mcpServers":{"context7":{"command":"npx"}}}`))
+		merged <- err
+	}()
+
+	select {
+	case err := <-merged:
+		t.Fatalf("merge finished while the lock was held (err = %v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := release(); err != nil {
+		t.Fatalf("release lock: %v", err)
+	}
+	if err := <-merged; err != nil {
+		t.Fatalf("merge after release error = %v", err)
+	}
+	if _, err := os.Stat(UserConfigPath(homeDir)); err != nil {
+		t.Fatalf("registry missing after released merge: %v", err)
 	}
 }
