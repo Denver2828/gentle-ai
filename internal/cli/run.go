@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/claude"
 	codexagent "github.com/gentleman-programming/gentle-ai/v2/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/kimi"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/assets"
@@ -1827,9 +1828,8 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			switch adapter.MCPStrategy() {
 			case model.StrategySeparateMCPFiles:
 				if adapter.Agent() == model.AgentClaudeCode {
-					if p := adapter.SettingsPath(homeDir); p != "" {
-						paths = append(paths, p)
-					}
+					// Context7 injection writes ~/.claude.json (issue #1868).
+					paths = append(paths, claude.UserConfigPath(homeDir))
 					break
 				}
 				paths = append(paths, adapter.MCPConfigPath(homeDir, "context7"))
